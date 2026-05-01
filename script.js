@@ -427,7 +427,7 @@ async function loadAdminMessages() {
                         <button class="button button-secondary" onclick="updateMessageStatus('${msg.id}', 'accepted')">Accept</button>
                         <button class="button button-secondary" onclick="updateMessageStatus('${msg.id}', 'rejected')">Reject</button>
                         <button class="button button-secondary" onclick="updateMessageStatus('${msg.id}', 'pending')">Mark Pending</button>
-                        ${hasContact ? `<button class="button button-primary" onclick="showSMSReplyModal('${msg.id}', '${escapeHtml(msg.name)}', '${escapeHtml(msg.contact)}')" style="background: var(--success-color); border-color: var(--success-color); color: white;">📱 Send SMS</button>` : ''}
+                        ${hasContact ? `<button class="button button-primary" onclick="showSMSReplyModal('${escapeForJS(msg.id)}', '${escapeForJS(msg.name)}', '${escapeForJS(msg.contact)}')" style="background: var(--success-color); border-color: var(--success-color); color: white;">📱 Send SMS</button>` : ''}
                     </div>
                 </div>
             `}).join('');
@@ -490,23 +490,27 @@ async function sendSMSReply(messageId, replyText) {
     }
 
     try {
-        // Get the message
+        // Get the message - try server first, then localStorage
         let messages = [];
         let usedServer = false;
 
         try {
-            const response = await fetch(`${API_BASE}?contact=placeholder`);
+            // Fetch all messages from server (without contact filter)
+            const response = await fetch(API_BASE);
             if (response.ok) {
                 messages = await response.json();
                 usedServer = true;
             }
         } catch (e) {
+            console.log('Server not available, using localStorage for SMS');
             messages = getMessagesFromStorage();
         }
 
         const message = messages.find(item => item.id === messageId);
         if (!message) {
-            alert('Message not found.');
+            console.error('Message not found. Looking for ID:', messageId);
+            console.error('Available message IDs:', messages.map(m => m.id));
+            alert('Message not found. Please refresh the page and try again.');
             return;
         }
 
@@ -739,8 +743,30 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-// Visit Tracking
+// Escape string for use in JavaScript onclick handlers
+function escapeForJS(str) {
+    if (!str) return '';
+    return str
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r');
+}
+
+// Local Storage keys for visit tracking (fallback when server is unavailable)
+const VISIT_STORAGE_KEY = 'sk_web_visits';
+const VISITOR_ID_KEY = 'sk_visitor_id';
+
+// Visit Tracking - works with localStorage as fallback
 function trackVisit() {
+    // Generate or get unique visitor ID
+    let visitorId = localStorage.getItem(VISITOR_ID_KEY);
+    if (!visitorId) {
+        visitorId = 'visitor_' + Date.now() + '_' + Math.random().toString(16).slice(2);
+        localStorage.setItem(VISITOR_ID_KEY, visitorId);
+    }
+
     // Generate or get session ID
     let sessionId = sessionStorage.getItem('sk_session_id');
     if (!sessionId) {
@@ -750,19 +776,83 @@ function trackVisit() {
 
     const userAgent = navigator.userAgent;
 
-    // Try to send visit to server
+    // Try to send visit to server first
     fetch('/api/visits', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json'
         },
         body: JSON.stringify({ sessionId, userAgent })
+    }).then(response => {
+        if (response.ok) {
+            return response.json();
+        }
+        throw new Error('Server not available');
+    }).then(data => {
+        console.log('Visit tracked on server:', data);
     }).catch(error => {
-        console.log('Visit tracking not available:', error);
+        // Fallback to localStorage tracking
+        console.log('Server tracking not available, using localStorage:', error);
+        trackVisitLocalStorage(visitorId, userAgent);
     });
 }
 
-// Load Visitor Count
+// Track visit using localStorage (fallback method)
+function trackVisitLocalStorage(visitorId, userAgent) {
+    try {
+        // Get existing visits
+        const visits = getVisitsFromStorage();
+        
+        // Check if this is a new visit (not within last 30 minutes)
+        const thirtyMinutesAgo = Date.now() - (30 * 60 * 1000);
+        const isDuplicate = visits.some(v => 
+            v.visitorId === visitorId && 
+            new Date(v.timestamp).getTime() > thirtyMinutesAgo
+        );
+
+        if (!isDuplicate) {
+            const newVisit = {
+                id: Date.now().toString() + Math.random().toString(16).slice(2),
+                timestamp: new Date().toISOString(),
+                visitorId: visitorId,
+                userAgent: userAgent,
+                referrer: document.referrer || 'Direct'
+            };
+            visits.push(newVisit);
+            saveVisitsToStorage(visits);
+            console.log('Visit tracked in localStorage:', newVisit);
+            
+            // Update the counter if on homepage
+            const visitorCountEl = document.getElementById('visitor-count');
+            if (visitorCountEl) {
+                animateCounter(visitorCountEl, visits.length);
+            }
+        }
+    } catch (error) {
+        console.error('Error tracking visit in localStorage:', error);
+    }
+}
+
+// Local Storage helpers for visits
+function getVisitsFromStorage() {
+    try {
+        const visits = localStorage.getItem(VISIT_STORAGE_KEY);
+        return visits ? JSON.parse(visits) : [];
+    } catch (e) {
+        console.error('Error reading visits from localStorage:', e);
+        return [];
+    }
+}
+
+function saveVisitsToStorage(visits) {
+    try {
+        localStorage.setItem(VISIT_STORAGE_KEY, JSON.stringify(visits));
+    } catch (e) {
+        console.error('Error saving visits to localStorage:', e);
+    }
+}
+
+// Load Visitor Count - works with server or localStorage fallback
 async function loadVisitorCount() {
     const visitorCountEl = document.getElementById('visitor-count');
     if (!visitorCountEl) return;
@@ -772,10 +862,19 @@ async function loadVisitorCount() {
         if (response.ok) {
             const data = await response.json();
             animateCounter(visitorCountEl, data.total);
+            return;
         }
     } catch (error) {
-        console.log('Could not load visitor count:', error);
-        // Fallback to a default number for demo purposes
+        console.log('Server not available for visitor count, using localStorage');
+    }
+
+    // Fallback to localStorage
+    try {
+        const visits = getVisitsFromStorage();
+        const count = visits.length > 0 ? visits.length : 1000; // Show at least 1000 as base
+        animateCounter(visitorCountEl, count);
+    } catch (error) {
+        console.error('Error loading visitor count from localStorage:', error);
         visitorCountEl.textContent = '1,000+';
     }
 }
@@ -804,7 +903,7 @@ function animateCounter(element, target) {
     requestAnimationFrame(update);
 }
 
-// Visit Statistics for Admin
+// Visit Statistics for Admin - works with server or localStorage fallback
 function initVisitStats() {
     const refreshBtn = document.getElementById('refresh-visits');
     const clearBtn = document.getElementById('clear-visits');
@@ -814,22 +913,23 @@ function initVisitStats() {
     }
 
     if (clearBtn) {
-        clearBtn.addEventListener('click', async function() {
+        clearBtn.addEventListener('click', function() {
             if (!confirm('Are you sure you want to clear all visit history? This cannot be undone.')) {
                 return;
             }
 
-            try {
-                const response = await fetch('/api/visits', {
-                    method: 'DELETE'
-                });
+            // Try server first, then fall back to localStorage
+            fetch('/api/visits', {
+                method: 'DELETE'
+            }).then(response => {
                 if (response.ok) {
                     loadVisitStatistics();
                 }
-            } catch (error) {
-                console.error('Error clearing visits:', error);
-                alert('Failed to clear visit history.');
-            }
+            }).catch(() => {
+                // Clear localStorage
+                localStorage.removeItem(VISIT_STORAGE_KEY);
+                loadVisitStatistics();
+            });
         });
     }
 
@@ -844,8 +944,11 @@ async function loadVisitStatistics() {
 
     if (!summaryContainer || !historyList) return;
 
+    let visits = [];
+    let usedServer = false;
+
     try {
-        // Load summary stats
+        // Try server first
         const statsResponse = await fetch('/api/visits');
         if (statsResponse.ok) {
             const stats = await statsResponse.json();
@@ -872,14 +975,65 @@ async function loadVisitStatistics() {
                     <span>Unique Visitors</span>
                 </div>
             `;
+            usedServer = true;
         }
+    } catch (error) {
+        console.log('Server not available for visit stats, using localStorage');
+    }
 
-        // Load visit history
-        const historyResponse = await fetch('/api/visits/history?page=1&limit=20');
-        if (historyResponse.ok) {
-            const historyData = await historyResponse.json();
+    // Fallback to localStorage
+    if (!usedServer) {
+        visits = getVisitsFromStorage();
+        
+        // Calculate statistics from localStorage data
+        const now = new Date();
+        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const weekStart = new Date(todayStart);
+        weekStart.setDate(weekStart.getDate() - 7);
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        
+        const todayVisits = visits.filter(v => new Date(v.timestamp) >= todayStart).length;
+        const weekVisits = visits.filter(v => new Date(v.timestamp) >= weekStart).length;
+        const monthVisits = visits.filter(v => new Date(v.timestamp) >= monthStart).length;
+        const totalVisits = visits.length;
+        const uniqueVisitors = new Set(visits.map(v => v.visitorId)).size;
+        
+        summaryContainer.innerHTML = `
+            <div class="admin-stat">
+                <strong>${totalVisits.toLocaleString()}</strong>
+                <span>Total Visits</span>
+            </div>
+            <div class="admin-stat">
+                <strong>${todayVisits.toLocaleString()}</strong>
+                <span>Today</span>
+            </div>
+            <div class="admin-stat">
+                <strong>${weekVisits.toLocaleString()}</strong>
+                <span>This Week</span>
+            </div>
+            <div class="admin-stat">
+                <strong>${monthVisits.toLocaleString()}</strong>
+                <span>This Month</span>
+            </div>
+            <div class="admin-stat">
+                <strong>${uniqueVisitors.toLocaleString()}</strong>
+                <span>Unique Visitors</span>
+            </div>
+        `;
+    }
+
+    // Load visit history - try server first, then localStorage
+    try {
+        if (!usedServer) {
+            // Use localStorage data
+            const sortedVisits = [...visits].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+            const page = 1;
+            const limit = 20;
+            const startIndex = (page - 1) * limit;
+            const paginatedVisits = sortedVisits.slice(startIndex, startIndex + limit);
+            const totalPages = Math.ceil(sortedVisits.length / limit);
             
-            if (historyData.visits.length === 0) {
+            if (paginatedVisits.length === 0) {
                 historyList.innerHTML = '<p class="contact-note">No visit records yet.</p>';
             } else {
                 historyList.innerHTML = `
@@ -893,16 +1047,17 @@ async function loadVisitStatistics() {
                             </tr>
                         </thead>
                         <tbody>
-                            ${historyData.visits.map(visit => {
+                            ${paginatedVisits.map(visit => {
                                 const browser = getBrowserName(visit.userAgent);
                                 const date = new Date(visit.timestamp).toLocaleString();
                                 const referrer = visit.referrer ? 
                                     (visit.referrer.length > 50 ? visit.referrer.substring(0, 50) + '...' : visit.referrer) : 
                                     'Direct';
+                                const visitorId = visit.visitorId || visit.ipHash || 'unknown';
                                 return `
                                     <tr>
                                         <td>${date}</td>
-                                        <td title="${visit.ipHash}">${visit.ipHash.substring(0, 8)}...</td>
+                                        <td title="${visitorId}">${visitorId.substring(0, 12)}...</td>
                                         <td>${browser}</td>
                                         <td>${referrer}</td>
                                     </tr>
@@ -913,10 +1068,10 @@ async function loadVisitStatistics() {
                 `;
 
                 // Pagination
-                if (historyData.pagination.totalPages > 1) {
+                if (totalPages > 1) {
                     let paginationHTML = '<div class="pagination">';
-                    for (let i = 1; i <= historyData.pagination.totalPages; i++) {
-                        paginationHTML += `<button class="button button-secondary" onclick="loadVisitPage(${i})">${i}</button>`;
+                    for (let i = 1; i <= totalPages; i++) {
+                        paginationHTML += `<button class="button button-secondary" onclick="loadVisitPageLocal(${i})">${i}</button>`;
                     }
                     paginationHTML += '</div>';
                     paginationContainer.innerHTML = paginationHTML;
@@ -924,70 +1079,125 @@ async function loadVisitStatistics() {
                     paginationContainer.innerHTML = '';
                 }
             }
+        } else {
+            // Use server data
+            const historyResponse = await fetch('/api/visits/history?page=1&limit=20');
+            if (historyResponse.ok) {
+                const historyData = await historyResponse.json();
+                
+                if (historyData.visits.length === 0) {
+                    historyList.innerHTML = '<p class="contact-note">No visit records yet.</p>';
+                } else {
+                    historyList.innerHTML = `
+                        <table class="visit-history-table">
+                            <thead>
+                                <tr>
+                                    <th>Date & Time</th>
+                                    <th>Visitor ID</th>
+                                    <th>Browser</th>
+                                    <th>Referrer</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${historyData.visits.map(visit => {
+                                    const browser = getBrowserName(visit.userAgent);
+                                    const date = new Date(visit.timestamp).toLocaleString();
+                                    const referrer = visit.referrer ? 
+                                        (visit.referrer.length > 50 ? visit.referrer.substring(0, 50) + '...' : visit.referrer) : 
+                                        'Direct';
+                                    return `
+                                        <tr>
+                                            <td>${date}</td>
+                                            <td title="${visit.ipHash}">${visit.ipHash.substring(0, 8)}...</td>
+                                            <td>${browser}</td>
+                                            <td>${referrer}</td>
+                                        </tr>
+                                    `;
+                                }).join('')}
+                            </tbody>
+                        </table>
+                    `;
+
+                    // Pagination
+                    if (historyData.pagination.totalPages > 1) {
+                        let paginationHTML = '<div class="pagination">';
+                        for (let i = 1; i <= historyData.pagination.totalPages; i++) {
+                            paginationHTML += `<button class="button button-secondary" onclick="loadVisitPage(${i})">${i}</button>`;
+                        }
+                        paginationHTML += '</div>';
+                        paginationContainer.innerHTML = paginationHTML;
+                    } else {
+                        paginationContainer.innerHTML = '';
+                    }
+                }
+            }
         }
     } catch (error) {
-        console.error('Error loading visit statistics:', error);
-        summaryContainer.innerHTML = '<p class="contact-note">Failed to load visit statistics.</p>';
+        console.error('Error loading visit history:', error);
+        historyList.innerHTML = '<p class="contact-note">Failed to load visit history.</p>';
     }
 }
 
-async function loadVisitPage(page) {
+// Local storage based pagination for visits
+function loadVisitPageLocal(page) {
     const historyList = document.getElementById('visit-history-list');
     const paginationContainer = document.getElementById('visit-pagination');
 
     if (!historyList) return;
 
-    try {
-        const response = await fetch(`/api/visits/history?page=${page}&limit=20`);
-        if (response.ok) {
-            const historyData = await response.json();
-            
-            historyList.innerHTML = `
-                <table class="visit-history-table">
-                    <thead>
-                        <tr>
-                            <th>Date & Time</th>
-                            <th>Visitor ID</th>
-                            <th>Browser</th>
-                            <th>Referrer</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${historyData.visits.map(visit => {
-                            const browser = getBrowserName(visit.userAgent);
-                            const date = new Date(visit.timestamp).toLocaleString();
-                            const referrer = visit.referrer ? 
-                                (visit.referrer.length > 50 ? visit.referrer.substring(0, 50) + '...' : visit.referrer) : 
-                                'Direct';
-                            return `
-                                <tr>
-                                    <td>${date}</td>
-                                    <td title="${visit.ipHash}">${visit.ipHash.substring(0, 8)}...</td>
-                                    <td>${browser}</td>
-                                    <td>${referrer}</td>
-                                </tr>
-                            `;
-                        }).join('')}
-                    </tbody>
-                </table>
-            `;
+    const visits = getVisitsFromStorage();
+    const limit = 20;
+    const sortedVisits = [...visits].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    const startIndex = (page - 1) * limit;
+    const paginatedVisits = sortedVisits.slice(startIndex, startIndex + limit);
+    const totalPages = Math.ceil(sortedVisits.length / limit);
 
-            // Update pagination
-            if (historyData.pagination.totalPages > 1) {
-                let paginationHTML = '<div class="pagination">';
-                for (let i = 1; i <= historyData.pagination.totalPages; i++) {
-                    paginationHTML += `<button class="button button-secondary ${i === page ? 'active' : ''}" onclick="loadVisitPage(${i})">${i}</button>`;
-                }
-                paginationHTML += '</div>';
-                paginationContainer.innerHTML = paginationHTML;
-            } else {
-                paginationContainer.innerHTML = '';
-            }
+    historyList.innerHTML = `
+        <table class="visit-history-table">
+            <thead>
+                <tr>
+                    <th>Date & Time</th>
+                    <th>Visitor ID</th>
+                    <th>Browser</th>
+                    <th>Referrer</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${paginatedVisits.map(visit => {
+                    const browser = getBrowserName(visit.userAgent);
+                    const date = new Date(visit.timestamp).toLocaleString();
+                    const referrer = visit.referrer ? 
+                        (visit.referrer.length > 50 ? visit.referrer.substring(0, 50) + '...' : visit.referrer) : 
+                        'Direct';
+                    const visitorId = visit.visitorId || 'unknown';
+                    return `
+                        <tr>
+                            <td>${date}</td>
+                            <td title="${visitorId}">${visitorId.substring(0, 12)}...</td>
+                            <td>${browser}</td>
+                            <td>${referrer}</td>
+                        </tr>
+                    `;
+                }).join('')}
+            </tbody>
+        </table>
+    `;
+
+    // Update pagination
+    if (totalPages > 1) {
+        let paginationHTML = '<div class="pagination">';
+        for (let i = 1; i <= totalPages; i++) {
+            paginationHTML += `<button class="button button-secondary ${i === page ? 'active' : ''}" onclick="loadVisitPageLocal(${i})">${i}</button>`;
         }
-    } catch (error) {
-        console.error('Error loading visit page:', error);
+        paginationHTML += '</div>';
+        paginationContainer.innerHTML = paginationHTML;
+    } else {
+        paginationContainer.innerHTML = '';
     }
 }
+
+// Make loadVisitPageLocal globally available
+window.loadVisitPageLocal = loadVisitPageLocal;
 
 function getBrowserName(userAgent) {
     if (!userAgent) return 'Unknown';

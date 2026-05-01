@@ -171,11 +171,29 @@ In `script.js`, modify the table HTML in `loadVisitStatistics` and `loadVisitPag
 
 ## Troubleshooting
 
-### Visitor count shows "1,000+"
-This is a fallback displayed when the server is not available. Make sure:
-- Node.js is installed
-- Server is running (`node server.js`)
-- No errors in browser console
+### Visitor count not showing correctly
+The visit counter now works in two modes:
+
+**Mode 1: With Node.js Server (Recommended for production)**
+- Start the server: `node server.js`
+- Navigate to `http://localhost:3000`
+- Visits are tracked server-side and persist across all users
+
+**Mode 2: Without Server (localStorage fallback)**
+- Simply open `index.html` in your browser
+- Visits are tracked locally in the browser's localStorage
+- Each browser/device will have its own count
+- This is useful for development or when Node.js is not available
+
+If you see "1,000+" it means:
+- No visits have been recorded yet in localStorage, OR
+- The server is not running and localStorage is empty
+
+To reset the counter, clear your browser's localStorage or run:
+```javascript
+localStorage.removeItem('sk_web_visits');
+localStorage.removeItem('sk_visitor_id');
+```
 
 ### Admin statistics not loading
 Check:
